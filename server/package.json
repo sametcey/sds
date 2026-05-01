@@ -1,0 +1,16 @@
+{
+  "name": "streakify-auth-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "auth-server.js",
+  "scripts": {
+    "start": "node auth-server.js",
+    "check": "node --check auth-server.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
