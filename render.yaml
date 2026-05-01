@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: streakify-auth
+    env: node
+    plan: starter
+    rootDir: server
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    disk:
+      name: streakify-auth-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: AUTH_PORT
+        value: 4000
+      - key: AUTH_DATA_DIR
+        value: /data
+      - key: AUTH_PUBLIC_BASE_URL
+        value: https://api.streakify.tr
+      - key: AUTH_ALLOWED_ORIGIN
+        value: "*"
+      - key: SMTP_HOST
+        value: smtp.resend.com
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_SECURE
+        value: false
+      - key: SMTP_USER
+        value: resend
+      - key: SMTP_FROM
+        value: Streakify <no-reply@streakify.tr>
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: SMTP_PASS
+        sync: false
