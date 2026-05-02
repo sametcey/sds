@@ -34,3 +34,5 @@ services:
         generateValue: true
       - key: SMTP_PASS
         sync: false
+      - key: AUTH_GOOGLE_WEB_CLIENT_ID
+        sync: false
