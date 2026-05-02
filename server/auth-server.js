@@ -3,13 +3,16 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const {OAuth2Client} = require('google-auth-library');
 const nodemailer = require('nodemailer');
 
-const PORT = Number(process.env.AUTH_PORT || process.env.PORT || 4000);
+const PORT = Number(process.env.PORT || process.env.AUTH_PORT || 4000);
 const PUBLIC_BASE_URL = process.env.AUTH_PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const JWT_SECRET = process.env.AUTH_JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const DATA_DIR = process.env.AUTH_DATA_DIR || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'users.json');
+const GOOGLE_WEB_CLIENT_ID = process.env.AUTH_GOOGLE_WEB_CLIENT_ID || '';
+const googleClient = GOOGLE_WEB_CLIENT_ID ? new OAuth2Client(GOOGLE_WEB_CLIENT_ID) : null;
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
   'Access-Control-Allow-Origin': process.env.AUTH_ALLOWED_ORIGIN || '*',
@@ -81,13 +84,21 @@ const uniqueUsername = (db, email, uid) => {
   while (db.profiles.some(profile => profile.uid !== uid && profile.usernameLower === username)) username = `${base}_${index++}`.slice(0, 20);
   return username;
 };
-const ensureProfile = (db, user) => {
+const ensureProfile = (db, user, extras = {}) => {
   let profile = db.profiles.find(item => item.uid === user.id);
-  if (profile) return profile;
-  const now = new Date().toISOString();
-  const username = uniqueUsername(db, user.email, user.id);
-  profile = {uid: user.id, username, usernameLower: username, displayName: username, email: user.email, photoURL: '', bio: '', streakIcon: '🔥', streakCount: 0, longestStreak: 0, totalVerifiedStudyMinutes: 0, createdAt: now, updatedAt: now, termsAccepted: Boolean(user.termsAccepted), termsAcceptedAt: user.termsAcceptedAt || '', privacyAccepted: Boolean(user.privacyAccepted), privacyAcceptedAt: user.privacyAcceptedAt || ''};
-  db.profiles.push(profile);
+  if (!profile) {
+    const now = new Date().toISOString();
+    const username = uniqueUsername(db, user.email, user.id);
+    profile = {uid: user.id, username, usernameLower: username, displayName: extras.displayName || username, email: user.email, photoURL: extras.photoURL || '', bio: '', streakIcon: '🔥', streakCount: 0, longestStreak: 0, totalVerifiedStudyMinutes: 0, createdAt: now, updatedAt: now, termsAccepted: Boolean(user.termsAccepted), termsAcceptedAt: user.termsAcceptedAt || '', privacyAccepted: Boolean(user.privacyAccepted), privacyAcceptedAt: user.privacyAcceptedAt || ''};
+    db.profiles.push(profile);
+  }
+  if (extras.displayName && (!profile.displayName || profile.displayName === profile.username)) profile.displayName = extras.displayName;
+  if (extras.photoURL && !profile.photoURL) profile.photoURL = extras.photoURL;
+  profile.email = user.email;
+  profile.termsAccepted = Boolean(user.termsAccepted);
+  profile.termsAcceptedAt = user.termsAcceptedAt || '';
+  profile.privacyAccepted = Boolean(user.privacyAccepted);
+  profile.privacyAcceptedAt = user.privacyAcceptedAt || '';
   return profile;
 };
 const getAuth = req => {
@@ -139,9 +150,40 @@ async function login(req, res) {
   const input = await readBody(req);
   const db = readDb();
   const user = db.users.find(item => item.email === normalizeEmail(input.email));
-  if (!user || !(await verifyPassword(String(input.password || ''), user.passwordHash))) return json(res, 401, {message: 'E-posta veya sifre hatali.'});
+  if (!user || !user.passwordHash || !(await verifyPassword(String(input.password || ''), user.passwordHash))) return json(res, 401, {message: 'E-posta veya sifre hatali.'});
   if (!user.emailVerified) return json(res, 403, {message: 'E-postan dogrulanmadi. Lutfen dogrulama mailindeki baglantiya tikla.'});
   return json(res, 200, {message: 'Giris basarili.', session: {token: signSession(user), user: publicUser(user)}});
+}
+async function googleLogin(req, res) {
+  if (!googleClient) return json(res, 500, {message: 'Google ile giris sunucuda yapilandirilmadi.'});
+  const input = await readBody(req);
+  const idToken = String(input.idToken || '');
+  if (!idToken) return json(res, 400, {message: 'Google oturum tokeni eksik.'});
+  const ticket = await googleClient.verifyIdToken({idToken, audience: GOOGLE_WEB_CLIENT_ID});
+  const payload = ticket.getPayload();
+  if (!payload?.sub || !payload.email) return json(res, 401, {message: 'Google hesabi dogrulanamadi.'});
+  if (payload.email_verified !== true) return json(res, 403, {message: 'Google e-postan dogrulanmamis gorunuyor.'});
+  const email = normalizeEmail(payload.email);
+  const db = readDb();
+  let user = db.users.find(item => item.googleSub === payload.sub || item.email === email);
+  const now = new Date().toISOString();
+  if (!user) {
+    if (!input.termsAccepted || !input.privacyAccepted) return json(res, 428, {message: 'Google ile ilk kez devam etmek icin Kayit ekranindan sozlesmeleri kabul etmelisin.'});
+    user = {id: crypto.randomUUID(), email, googleSub: payload.sub, provider: 'google', createdAt: now, updatedAt: now, emailVerified: true, termsAccepted: true, termsAcceptedAt: input.termsAcceptedAt || now, privacyAccepted: true, privacyAcceptedAt: input.privacyAcceptedAt || now};
+    db.users.push(user);
+  } else {
+    user.googleSub = payload.sub;
+    user.provider = user.provider || 'google';
+    user.emailVerified = true;
+    user.updatedAt = now;
+    user.termsAccepted = user.termsAccepted || Boolean(input.termsAccepted);
+    user.termsAcceptedAt = user.termsAcceptedAt || input.termsAcceptedAt || null;
+    user.privacyAccepted = user.privacyAccepted || Boolean(input.privacyAccepted);
+    user.privacyAcceptedAt = user.privacyAcceptedAt || input.privacyAcceptedAt || null;
+  }
+  ensureProfile(db, user, {displayName: payload.name || '', photoURL: payload.picture || ''});
+  writeDb(db);
+  return json(res, 200, {message: 'Google ile giris basarili.', session: {token: signSession(user), user: publicUser(user)}});
 }
 async function resend(req, res) {
   const input = await readBody(req);
@@ -197,6 +239,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/privacy') return html(res, 'Gizlilik Politikasi', 'Streakify e-posta, profil, calisma plani, streak, arkadaslik ve mesaj verilerini uygulama ozelliklerini calistirmak icin isleyebilir. Sifreler duz metin saklanmaz.');
     if (req.method === 'POST' && req.url === '/auth/register') return await register(req, res);
     if (req.method === 'POST' && req.url === '/auth/login') return await login(req, res);
+    if (req.method === 'POST' && req.url === '/auth/google') return await googleLogin(req, res);
     if (req.method === 'POST' && req.url === '/auth/resend-verification') return await resend(req, res);
     if (req.method === 'GET' && req.url.startsWith('/auth/verify')) return verifyEmail(req, res);
     if (req.method === 'GET' && req.url === '/auth/me') return me(req, res);
